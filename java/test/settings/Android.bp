@@ -1,4 +1,4 @@
-// Copyright (C) 2019 Google Inc.
+// Copyright (C) 2020 Google Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,14 +13,14 @@
 // limitations under the License.
 
 java_library {
-    name: "chre-test-utils",
+    name: "context-hub-settings-test",
 
     srcs: ["src/**/*.java"],
 
     static_libs: [
         "androidx.test.rules",
-        "chrecrossvalidation_java_proto",
-        "guava",
+        "chre_settings_test_java_proto",
+        "chre-test-utils",
     ],
 
     sdk_version: "system_current",
