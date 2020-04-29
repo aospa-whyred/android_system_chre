@@ -47,7 +47,7 @@ bool getIndexForSetting(Setting setting, size_t *index) {
 void setSettingState(Setting setting, SettingState state) {
   size_t index;
   if (!getIndexForSetting(setting, &index)) {
-    LOGE("Unknown setting %" PRIu8, setting);
+    LOGE("Unknown setting %" PRIu8, static_cast<uint8_t>(setting));
   } else {
     gSettingStateList[index] = state;
   }
@@ -71,6 +71,8 @@ const char *getSettingStateString(Setting setting) {
 }  // anonymous namespace
 
 void postSettingChange(Setting setting, SettingState state) {
+  LOGD("Posting setting change: setting type %" PRIu8 " state %" PRIu8,
+       static_cast<uint8_t>(setting), static_cast<uint8_t>(state));
   struct SettingChange {
     Setting setting;
     SettingState state;
@@ -103,7 +105,7 @@ SettingState getSettingState(Setting setting) {
     return gSettingStateList[index];
   }
 
-  LOGE("Unknown setting %" PRIu8, setting);
+  LOGE("Unknown setting %" PRIu8, static_cast<uint8_t>(setting));
   return SettingState::SETTING_STATE_MAX;
 }
 
