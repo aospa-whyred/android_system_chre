@@ -88,6 +88,13 @@ void Manager::handleEvent(uint32_t senderInstanceId, uint16_t eventType,
       handleSensorFloatData(static_cast<const chreSensorFloatData *>(eventData),
                             CHRE_SENSOR_TYPE_PRESSURE);
       break;
+    case CHRE_EVENT_SENSOR_LIGHT_DATA:
+      handleSensorFloatData(static_cast<const chreSensorFloatData *>(eventData),
+                            CHRE_SENSOR_TYPE_LIGHT);
+      break;
+    case CHRE_EVENT_SENSOR_PROXIMITY_DATA:
+      handleProximityData(static_cast<const chreSensorByteData *>(eventData));
+      break;
     default:
       LOGE("Got unknown event type from senderInstanceId %" PRIu32
            " and with eventType %" PRIu16,
@@ -136,6 +143,23 @@ bool Manager::encodeFloatSensorDatapointValue(pb_ostream_t *stream,
     return false;
   }
   if (!pb_encode_fixed32(stream, &sensorFloatDataSample->value)) {
+    return false;
+  }
+  return true;
+}
+
+bool Manager::encodeProximitySensorDatapointValue(pb_ostream_t *stream,
+                                                  const pb_field_t * /*field*/,
+                                                  void *const *arg) {
+  const auto *sensorFloatDataSample =
+      static_cast<const chreSensorByteData::chreSensorByteSampleData *>(*arg);
+  if (!pb_encode_tag_for_field(
+          stream, &chre_cross_validation_SensorDatapoint_fields
+                      [chre_cross_validation_SensorDatapoint_values_tag - 1])) {
+    return false;
+  }
+  float isNearFloat = sensorFloatDataSample->isNear ? 0.0 : 1.0;
+  if (!pb_encode_fixed32(stream, &isNearFloat)) {
     return false;
   }
   return true;
@@ -194,18 +218,58 @@ bool Manager::encodeFloatSensorDatapoints(pb_ostream_t *stream,
   return true;
 }
 
+bool Manager::encodeProximitySensorDatapoints(pb_ostream_t *stream,
+                                              const pb_field_t * /*field*/,
+                                              void *const *arg) {
+  const auto *sensorProximityData =
+      static_cast<const chreSensorByteData *>(*arg);
+  uint64_t currentTimestamp = sensorProximityData->header.baseTimestamp +
+                              chreGetEstimatedHostTimeOffset();
+  for (size_t i = 0; i < sensorProximityData->header.readingCount; i++) {
+    const chreSensorByteData::chreSensorByteSampleData &sampleData =
+        sensorProximityData->readings[i];
+    currentTimestamp += sampleData.timestampDelta;
+    if (!pb_encode_tag_for_field(
+            stream,
+            &chre_cross_validation_SensorData_fields
+                [chre_cross_validation_SensorData_datapoints_tag - 1])) {
+      return false;
+    }
+    chre_cross_validation_SensorDatapoint datapoint = makeDatapoint(
+        encodeProximitySensorDatapointValue, &sampleData, currentTimestamp);
+    if (!pb_encode_submessage(
+            stream, chre_cross_validation_SensorDatapoint_fields, &datapoint)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool Manager::handleStartSensorMessage(
     const chre_cross_validation_StartSensorCommand &startSensorCommand) {
   bool success = true;
   uint8_t sensorType = startSensorCommand.chreSensorType;
   uint64_t interval = startSensorCommand.samplingIntervalInNs;
   uint64_t latency = startSensorCommand.samplingMaxLatencyInNs;
+  bool isContinuous = startSensorCommand.isContinuous;
   uint32_t handle;
   if (!chreSensorFindDefault(sensorType, &handle)) {
     LOGE("Could not find default sensor for sensorType %" PRIu8, sensorType);
     success = false;
     // TODO(b/146052784): Test other sensor configure modes
   } else {
+    // If the sensor is on-change or one-shot then the interval from host
+    // message will be 0 which cannot be passed to chreSensorConfigure so set
+    // the interval and latency to default in that case
+    if (!isContinuous) {
+      interval = CHRE_SENSOR_INTERVAL_DEFAULT;
+      latency = CHRE_SENSOR_LATENCY_DEFAULT;
+    }
+    // Copy hostEndpoint param from previous version of cross validator
+    // state
+    mCrossValidatorState = CrossValidatorState(
+        CrossValidatorType::SENSOR, sensorType, handle, chreGetTime(),
+        mCrossValidatorState->hostEndpoint, isContinuous);
     if (!chreSensorConfigure(handle, CHRE_SENSOR_CONFIGURE_MODE_CONTINUOUS,
                              interval, latency)) {
       LOGE("Error configuring sensor with sensorType %" PRIu8
@@ -213,11 +277,6 @@ bool Manager::handleStartSensorMessage(
            sensorType, interval, latency);
       success = false;
     } else {
-      // Copy hostEndpoint param from previous version of cross validator
-      // state
-      mCrossValidatorState = CrossValidatorState(
-          CrossValidatorType::SENSOR, sensorType, handle, chreGetTime(),
-          mCrossValidatorState->hostEndpoint);
       LOGD("Sensor with sensor type %" PRIu8 " configured", sensorType);
     }
   }
@@ -225,21 +284,25 @@ bool Manager::handleStartSensorMessage(
 }
 
 bool Manager::isValidHeader(const chreSensorDataHeader &header) {
-  return header.readingCount > 0 && mCrossValidatorState.has_value() &&
-         header.baseTimestamp > mCrossValidatorState->timeStart;
+  // On-change sensors may send cached values because the data value has not
+  // changed since the test started
+  bool isTimestampValid =
+      !mCrossValidatorState->isContinuous ||
+      header.baseTimestamp >= mCrossValidatorState->timeStart;
+  return header.readingCount > 0 && isTimestampValid;
 }
 
 void Manager::handleStartMessage(const chreMessageFromHostData *hostData) {
   bool success = true;
+  uint16_t hostEndpoint;
   if (hostData->hostEndpoint != CHRE_HOST_ENDPOINT_UNSPECIFIED) {
-    // Default values for everything but hostEndpoint param
-    mCrossValidatorState = CrossValidatorState(CrossValidatorType::SENSOR, 0, 0,
-                                               0, hostData->hostEndpoint);
+    hostEndpoint = hostData->hostEndpoint;
   } else {
-    // Default values for everything but hostEndpoint param
-    mCrossValidatorState = CrossValidatorState(CrossValidatorType::SENSOR, 0, 0,
-                                               0, CHRE_HOST_ENDPOINT_BROADCAST);
+    hostEndpoint = CHRE_HOST_ENDPOINT_BROADCAST;
   }
+  // Default values for everything but hostEndpoint param
+  mCrossValidatorState = CrossValidatorState(CrossValidatorType::SENSOR, 0, 0,
+                                             0, hostEndpoint, false);
   pb_istream_t istream = pb_istream_from_buffer(
       static_cast<const pb_byte_t *>(hostData->message), hostData->messageSize);
   chre_cross_validation_StartCommand startCommand =
@@ -320,6 +383,26 @@ chre_cross_validation_Data Manager::makeSensorFloatData(
   return newData;
 }
 
+chre_cross_validation_Data Manager::makeSensorProximityData(
+    const chreSensorByteData *proximityDataFromChre) {
+  chre_cross_validation_SensorData newProximityData = {
+      .has_chreSensorType = true,
+      .chreSensorType = CHRE_SENSOR_TYPE_PROXIMITY,
+      .has_accuracy = true,
+      .accuracy = proximityDataFromChre->header.accuracy,
+      .datapoints = {
+          .funcs = {.encode = encodeProximitySensorDatapoints},
+          .arg = const_cast<chreSensorByteData *>(proximityDataFromChre)}};
+  chre_cross_validation_Data newData = {
+      .which_data = chre_cross_validation_Data_sensorData_tag,
+      .data =
+          {
+              .sensorData = newProximityData,
+          },
+  };
+  return newData;
+}
+
 void Manager::handleSensorThreeAxisData(
     const chreSensorThreeAxisData *threeAxisDataFromChre, uint8_t sensorType) {
   if (processSensorData(threeAxisDataFromChre->header, sensorType)) {
@@ -334,6 +417,16 @@ void Manager::handleSensorFloatData(
   if (processSensorData(floatDataFromChre->header, sensorType)) {
     chre_cross_validation_Data newData =
         makeSensorFloatData(floatDataFromChre, sensorType);
+    encodeAndSendDataToHost(newData);
+  }
+}
+
+void Manager::handleProximityData(
+    const chreSensorByteData *proximityDataFromChre) {
+  if (processSensorData(proximityDataFromChre->header,
+                        CHRE_SENSOR_TYPE_PROXIMITY)) {
+    chre_cross_validation_Data newData =
+        makeSensorProximityData(proximityDataFromChre);
     encodeAndSendDataToHost(newData);
   }
 }
@@ -364,10 +457,10 @@ void Manager::encodeAndSendDataToHost(const chre_cross_validation_Data &data) {
 
 bool Manager::processSensorData(const chreSensorDataHeader &header,
                                 uint8_t sensorType) {
-  if (!isValidHeader(header)) {
-    LOGE("Invalid data being thrown away");
-  } else if (!mCrossValidatorState.has_value()) {
+  if (!mCrossValidatorState.has_value()) {
     LOGE("Start message not received or invalid when data received");
+  } else if (!isValidHeader(header)) {
+    LOGE("Invalid data being thrown away");
   } else if (!sensorTypeIsValid(sensorType)) {
     LOGE("Unexpected sensor data type %" PRIu8 ", expected %" PRIu8, sensorType,
          mCrossValidatorState->sensorType);

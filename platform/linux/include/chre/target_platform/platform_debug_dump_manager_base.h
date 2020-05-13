@@ -14,27 +14,21 @@
  * limitations under the License.
  */
 
-#ifndef CHRE_PLATFORM_SHARED_DEBUG_DUMP_H_
-#define CHRE_PLATFORM_SHARED_DEBUG_DUMP_H_
+#ifndef CHRE_PLATFORM_LINUX_PLATFORM_DEBUG_DUMP_MANAGER_BASE_H_
+#define CHRE_PLATFORM_LINUX_PLATFORM_DEBUG_DUMP_MANAGER_BASE_H_
 
-#include <stdarg.h>
+#include <cstddef>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+namespace chre {
 
 /**
- * Platform implementation of chreDebugDumpLog.
- *
- * This function implements chreDebugDumpLog, and is called through either the
- * CHRE API or the nanoapp support library.
- *
- * @see chreDebugDumpLog
+ * Linux-specific debug dump functionality.
  */
-void platform_chreDebugDumpVaLog(const char *formatStr, va_list args);
+class PlatformDebugDumpManagerBase {
+ protected:
+  static constexpr size_t kDebugDumpStrMaxSize = CHRE_MESSAGE_TO_HOST_MAX_SIZE;
+};
 
-#ifdef __cplusplus
-}
-#endif
+}  // namespace chre
 
-#endif  // CHRE_PLATFORM_SHARED_DEBUG_DUMP_H_
+#endif  // CHRE_PLATFORM_LINUX_PLATFORM_DEBUG_DUMP_MANAGER_BASE_H_

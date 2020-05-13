@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
-#include "chre/platform/shared/debug_dump.h"
+#include "chre/platform/platform_debug_dump_manager.h"
 
 namespace chre {
 
-void platform_chreDebugDumpVaLog(const char *formatStr, va_list args) {}
+void PlatformDebugDumpManager::sendDebugDump(const char * /*debugStr*/,
+                                             bool /*complete*/) {}
 
 }  // namespace chre
