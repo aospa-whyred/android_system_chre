@@ -71,6 +71,7 @@ void Sensor::populateSensorInfo(struct chreSensorInfo *info,
   info->isOnChange = isOnChange();
   info->isOneShot = isOneShot();
   info->reportsBiasEvents = reportsBiasEvents();
+  info->supportsPassiveMode = supportsPassiveMode();
   info->unusedFlags = 0;
   info->sensorName = getSensorName();
 
@@ -95,11 +96,12 @@ void Sensor::cancelPendingFlushRequestTimer() {
 }
 
 void Sensor::setLastEvent(ChreSensorData *event) {
-  size_t lastEventSize = getLastEventSize();
-  if (event == nullptr || lastEventSize == 0) {
+  if (event == nullptr) {
     mLastEventValid = false;
   } else {
-    memcpy(mLastEvent, event, lastEventSize);
+    CHRE_ASSERT(event->header.readingCount > 0);
+
+    SensorTypeHelpers::getLastSample(getSensorType(), event, mLastEvent);
     mLastEventValid = true;
   }
 }

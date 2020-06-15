@@ -22,12 +22,13 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.hardware.location.ContextHubInfo;
 import android.hardware.location.ContextHubManager;
+import android.hardware.location.ContextHubTransaction;
 import android.hardware.location.NanoAppBinary;
 import android.hardware.location.NanoAppMessage;
 
 import androidx.test.InstrumentationRegistry;
 
-import com.google.android.chre.nanoapp.proto.ChreCrossValidation;
+import com.google.android.chre.nanoapp.proto.ChreCrossValidationSensor;
 import com.google.android.utils.chre.ChreTestUtil;
 import com.google.common.collect.BiMap;
 import com.google.common.collect.HashBiMap;
@@ -59,6 +60,8 @@ public class ChreCrossValidatorSensor
             this.errorMargin = errorMargin;
         }
     }
+
+    private static final long NANO_APP_ID = 0x476f6f6754000002L;
 
     private static final long AWAIT_DATA_TIMEOUT_CONTINUOUS_IN_MS = 5000;
     private static final long AWAIT_DATA_TIMEOUT_ON_CHANGE_ONE_SHOT_IN_MS = 1000;
@@ -103,6 +106,9 @@ public class ChreCrossValidatorSensor
             ContextHubInfo contextHubInfo, NanoAppBinary nanoAppBinary, int apSensorType)
             throws AssertionError {
         super(contextHubManager, contextHubInfo, nanoAppBinary);
+        Assert.assertTrue("Nanoapp given to cross validator is not the designated chre cross"
+                + " validation nanoapp.",
+                nanoAppBinary.getNanoAppId() == NANO_APP_ID);
         mApDatapointsQueue = new ConcurrentLinkedQueue<ApSensorDatapoint>();
         mChreDatapointsQueue = new ConcurrentLinkedQueue<ChreSensorDatapoint>();
         Assert.assertTrue(String.format("Sensor type %d is not recognized", apSensorType),
@@ -124,19 +130,28 @@ public class ChreCrossValidatorSensor
     }
 
     @Override
-    protected NanoAppMessage makeStartNanoAppMessage() {
-        int messageType = ChreCrossValidation.MessageType.CHRE_CROSS_VALIDATION_START_VALUE;
-        ChreCrossValidation.StartSensorCommand startSensor =
-                ChreCrossValidation.StartSensorCommand.newBuilder()
-                .setSamplingIntervalInNs(TimeUnit.MILLISECONDS.toNanos(
-                          mSamplingIntervalInMs))
-                .setSamplingMaxLatencyInNs(TimeUnit.MILLISECONDS.toNanos(SAMPLING_LATENCY_IN_MS))
+    public void validate() throws AssertionError {
+        collectDataFromAp();
+        collectDataFromChre();
+        waitForDataSampling();
+        assertApAndChreDataSimilar();
+    }
+
+    /**
+    * @return The nanoapp message used to start the data collection in chre
+    */
+    private NanoAppMessage makeStartNanoAppMessage() {
+        int messageType = ChreCrossValidationSensor.MessageType.CHRE_CROSS_VALIDATION_START_VALUE;
+        ChreCrossValidationSensor.StartSensorCommand startSensor =
+                ChreCrossValidationSensor.StartSensorCommand.newBuilder()
                 .setChreSensorType(getChreSensorType())
+                .setIntervalInMs(mSamplingIntervalInMs)
+                .setLatencyInMs(SAMPLING_LATENCY_IN_MS)
                 .setIsContinuous(sensorIsContinuous())
                 .build();
-        ChreCrossValidation.StartCommand startCommand =
-                ChreCrossValidation.StartCommand.newBuilder().setStartSensorCommand(startSensor)
-                .build();
+        ChreCrossValidationSensor.StartCommand startCommand =
+                ChreCrossValidationSensor.StartCommand.newBuilder()
+                .setStartSensorCommand(startSensor).build();
         return NanoAppMessage.createMessageToNanoApp(
                 mNappBinary.getNanoAppId(), messageType, startCommand.toByteArray());
     }
@@ -144,9 +159,9 @@ public class ChreCrossValidatorSensor
     @Override
     protected void parseDataFromNanoAppMessage(NanoAppMessage message) {
         final String kParseDataErrorPrefix = "While parsing data from nanoapp: ";
-        ChreCrossValidation.Data dataProto;
+        ChreCrossValidationSensor.Data dataProto;
         try {
-            dataProto = ChreCrossValidation.Data.parseFrom(message.getMessageBody());
+            dataProto = ChreCrossValidationSensor.Data.parseFrom(message.getMessageBody());
         } catch (InvalidProtocolBufferException e) {
             setErrorStr("Error parsing protobuff: " + e);
             return;
@@ -154,7 +169,7 @@ public class ChreCrossValidatorSensor
         if (!dataProto.hasSensorData()) {
             setErrorStr(kParseDataErrorPrefix + "found non sensor type data");
         } else {
-            ChreCrossValidation.SensorData sensorData = dataProto.getSensorData();
+            ChreCrossValidationSensor.SensorData sensorData = dataProto.getSensorData();
             int sensorType = chreToApSensorType(sensorData.getChreSensorType());
             if (!isSensorTypeCurrent(sensorType)) {
                 setErrorStr(
@@ -162,7 +177,7 @@ public class ChreCrossValidatorSensor
                         + "incorrect sensor type %d when expecting %d",
                         sensorType, mSensor.getType()));
             } else {
-                for (ChreCrossValidation.SensorDatapoint datapoint :
+                for (ChreCrossValidationSensor.SensorDatapoint datapoint :
                         sensorData.getDatapointsList()) {
                     int valuesLength = datapoint.getValuesList().size();
                     if (valuesLength != mSensorConfig.expectedValuesLength) {
@@ -177,20 +192,7 @@ public class ChreCrossValidatorSensor
         }
     }
 
-    @Override
-    protected void registerApDataListener() {
-        Assert.assertTrue(mSensorManager.registerListener(
-                this, mSensor, (int) TimeUnit.MILLISECONDS.toMicros(
-                mSamplingIntervalInMs)));
-    }
-
-    @Override
-    protected void unregisterApDataListener() {
-        mSensorManager.unregisterListener(this);
-    }
-
-    @Override
-    protected void assertApAndChreDataSimilar() throws AssertionError {
+    private void assertApAndChreDataSimilar() throws AssertionError {
         // Copy concurrent queues to arrays so that other threads will not mutate the data being
         // worked on
         mApDatapointsArray = mApDatapointsQueue.toArray(new ApSensorDatapoint[0]);
@@ -208,8 +210,7 @@ public class ChreCrossValidatorSensor
         }
     }
 
-    @Override
-    protected long getAwaitDataTimeoutInMs() {
+    private long getAwaitDataTimeoutInMs() {
         if (mSensor.getType() == Sensor.REPORTING_MODE_CONTINUOUS) {
             return AWAIT_DATA_TIMEOUT_CONTINUOUS_IN_MS;
         } else {
@@ -273,7 +274,7 @@ public class ChreCrossValidatorSensor
         // new CrossValidatorSensorConfig(<expectedValuesLength>, <errorMargin>)
         map.put(Sensor.TYPE_ACCELEROMETER, new CrossValidatorSensorConfig(3, 0.01f));
         map.put(Sensor.TYPE_GYROSCOPE, new CrossValidatorSensorConfig(3, 0.01f));
-        map.put(Sensor.TYPE_MAGNETIC_FIELD, new CrossValidatorSensorConfig(3, 0.01f));
+        map.put(Sensor.TYPE_MAGNETIC_FIELD, new CrossValidatorSensorConfig(3, 0.05f));
         map.put(Sensor.TYPE_PRESSURE, new CrossValidatorSensorConfig(1, 0.01f));
         map.put(Sensor.TYPE_LIGHT, new CrossValidatorSensorConfig(1, 0.01f));
         map.put(Sensor.TYPE_PROXIMITY, new CrossValidatorSensorConfig(1, 0.01f));
@@ -297,6 +298,48 @@ public class ChreCrossValidatorSensor
         return map;
     }
 
+    /**
+    * Start collecting data from AP
+    */
+    private void collectDataFromAp() {
+        Assert.assertTrue(mSensorManager.registerListener(
+                this, mSensor, (int) TimeUnit.MILLISECONDS.toMicros(mSamplingIntervalInMs)));
+    }
+
+    /**
+    * Start collecting data from CHRE
+    */
+    private void collectDataFromChre() throws AssertionError {
+        // The info in the start message will inform the nanoapp of which type of
+        // data to collect (accel, gyro, gnss, wifi, etc).
+        int result = mContextHubClient.sendMessageToNanoApp(makeStartNanoAppMessage());
+        if (result != ContextHubTransaction.RESULT_SUCCESS) {
+            Assert.fail("Collect data from CHRE failed with result "
+                    + contextHubTransactionResultToString(result)
+                    + " while trying to send start message.");
+        }
+    }
+
+    /**
+    * Wait for AP and CHRE data to be fully collected or timeouts occur. collectDataFromAp and
+    * collectDataFromChre methods should both be called before this.
+    *
+    * @param samplingDurationInMs The amount of time to wait for AP and CHRE to collected data in
+    * ms.
+    */
+    private void waitForDataSampling() throws AssertionError {
+        mCollectingData.set(true);
+        try {
+            mAwaitDataLatch.await(getAwaitDataTimeoutInMs(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Assert.fail("await data latch interrupted");
+        }
+        if (mErrorStr.get() != null) {
+            Assert.fail(mErrorStr.get());
+        }
+        mCollectingData.set(false);
+    }
+
     /*
     * Align the AP and CHRE datapoints by finding the first pair that are similar comparing
     * linearly from there. Also truncate the end if one list has more datapoints than the other
@@ -309,11 +352,11 @@ public class ChreCrossValidatorSensor
         if (mApDatapointsArray[0].timestamp < mChreDatapointsArray[0].timestamp) {
             matchChre = 0;
             matchAp = indexOfFirstClosestDatapoint((SensorDatapoint[]) mApDatapointsArray,
-                                                   shorterDpLength, mChreDatapointsArray[0]);
+                                                   mChreDatapointsArray[0]);
         } else {
             matchAp = 0;
             matchChre = indexOfFirstClosestDatapoint((SensorDatapoint[]) mChreDatapointsArray,
-                                                     shorterDpLength, mApDatapointsArray[0]);
+                                                     mApDatapointsArray[0]);
         }
         Assert.assertTrue("Did not find matching timestamps to align AP and CHRE datapoints.",
                           (matchAp != -1 && matchChre != -1));
@@ -322,8 +365,9 @@ public class ChreCrossValidatorSensor
         int chreStartI = matchChre;
         int newApLength = mApDatapointsArray.length - apStartI;
         int newChreLength = mChreDatapointsArray.length - chreStartI;
-        int chreEndI = chreStartI + Math.min(newApLength, newChreLength);
-        int apEndI = apStartI + Math.min(newApLength, newChreLength);
+        int minLength = Math.min(newApLength, newChreLength);
+        int chreEndI = chreStartI + minLength;
+        int apEndI = apStartI + minLength;
         mApDatapointsArray = Arrays.copyOfRange(mApDatapointsArray, apStartI, apEndI);
         mChreDatapointsArray = Arrays.copyOfRange(mChreDatapointsArray, chreStartI, chreEndI);
     }
@@ -342,6 +386,11 @@ public class ChreCrossValidatorSensor
     private void unrestrictSensors() {
         ChreTestUtil.executeShellCommand(
                 InstrumentationRegistry.getInstrumentation(), "dumpsys sensorservice enable");
+    }
+
+    @Override
+    protected void unregisterApDataListener() {
+        mSensorManager.unregisterListener(this);
     }
 
     /**
@@ -370,13 +419,12 @@ public class ChreCrossValidatorSensor
 
     /**
      * @param datapoints Array of dataoints to compare timestamps to laterDp
-     * @param shorterLength Length of shorter datapoints array
      * @param laterDp SensorDatapoint whose timestamp will be compared to the datapoints in array
      *    to find the first pair that match.
      */
-    private int indexOfFirstClosestDatapoint(SensorDatapoint[] sensorDatapoints, int shorterLength,
+    private int indexOfFirstClosestDatapoint(SensorDatapoint[] sensorDatapoints,
                                              SensorDatapoint laterDp) {
-        for (int i = 0; i < shorterLength; i++) {
+        for (int i = 0; i < sensorDatapoints.length; i++) {
             if (datapointTimestampsAreSimilar(sensorDatapoints[i], laterDp)) {
                 return i;
             }
@@ -440,6 +488,7 @@ public class ChreCrossValidatorSensor
                 }
             } else {
                 float diff = Math.abs(apDp.values[i] - chreDp.values[i]);
+                // TODO(b/157732778): Find a better way to compare sensor values.
                 if (diff > errorMargin) {
                     return false;
                 }

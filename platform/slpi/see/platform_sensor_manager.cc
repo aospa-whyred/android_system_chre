@@ -627,11 +627,6 @@ bool PlatformSensorManager::configureSensor(Sensor &sensor,
                                     kOneMicrosecondInNanoseconds),
   };
 
-  if (req.enable && req.passive && !sensor.isPassiveSupported()) {
-    LOGD("Promoting sensor %" PRIu8 " passive request to active",
-         sensor.getSensorType());
-  }
-
   SeeHelper &seeHelper = getSeeHelperForSensorType(sensor.getSensorType());
   bool wasInUImage = slpiInUImage();
 
@@ -680,17 +675,13 @@ bool PlatformSensorManager::configureSensor(Sensor &sensor,
   }
 
   if (success) {
-    if (request.getMode() == SensorMode::Off) {
-      sensor.setLastEvent(nullptr);
-    }
-
     // TODO: remove setSamplingStatus when .latency is available in status
     // update from SEE.
     struct chreSensorSamplingStatus status;
     if (sensor.getSamplingStatus(&status)) {
       // If passive request is not supported by this SEE sensor, it won't be
       // dynamically enabled/disabled and its status stays the same as set here.
-      if (!sensor.isPassiveSupported()) {
+      if (!sensor.supportsPassiveMode()) {
         status.enabled = req.enable;
       }
       status.latency = req.batchPeriodUs * kOneMicrosecondInNanoseconds;
@@ -730,10 +721,15 @@ bool PlatformSensorManager::getThreeAxisBias(
         PlatformSensorTypeHelpers::toCalibratedSensorType(sensorType);
 #endif
     if (!calHelper->getBias(calSensorType, bias)) {
-      // Set to zero value + unknown accuracy per CHRE API requirements.
+      // Set to zero bias + unknown accuracy per CHRE API requirements.
       memset(bias, 0, sizeof(chreSensorThreeAxisData));
+      bias->header.readingCount = 1;
       bias->header.accuracy = CHRE_SENSOR_ACCURACY_UNKNOWN;
     }
+
+    // Overwrite sensorHandle to match the request type.
+    getSensorRequestManager().getSensorHandle(sensorType,
+                                              &bias->header.sensorHandle);
   }
 
   return success;
@@ -767,30 +763,41 @@ void PlatformSensorManagerBase::onSamplingStatusUpdate(
   // TODO: Once the latency field is actually filled in by SEE, modify this
   // logic to avoid reacting if the latency and interval of the sensor are
   // updated separately, but contain the same info as before.
-  if (sensor != nullptr &&
-      !isSameStatusUpdate(sensor->mLastReceivedSamplingStatus, *status.get())) {
-    sensor->mLastReceivedSamplingStatus = *status.get();
+  if (sensor != nullptr) {
+    // Ignore the enabled flag from status update if this is not a passive mode
+    // supported sensor because this may cause the sampling status in CHRE to
+    // go out of sync with reality
+    if (!sensor->supportsPassiveMode()) {
+      status->status.enabled =
+          sensor->mLastReceivedSamplingStatus.status.enabled;
+      status->enabledValid = sensor->mLastReceivedSamplingStatus.enabledValid;
+    }
+    if (!isSameStatusUpdate(sensor->mLastReceivedSamplingStatus,
+                            *status.get())) {
+      sensor->mLastReceivedSamplingStatus = *status.get();
 
-    auto callback = [](uint16_t /* type */, void *data) {
-      auto cbData = UniquePtr<SeeHelperCallbackInterface::SamplingStatusData>(
-          static_cast<SeeHelperCallbackInterface::SamplingStatusData *>(data));
+      auto callback = [](uint16_t /* type */, void *data) {
+        auto cbData = UniquePtr<SeeHelperCallbackInterface::SamplingStatusData>(
+            static_cast<SeeHelperCallbackInterface::SamplingStatusData *>(
+                data));
 
-      uint32_t sensorHandle;
-      getSensorRequestManager().getSensorHandle(cbData->sensorType,
-                                                &sensorHandle);
+        uint32_t sensorHandle;
+        getSensorRequestManager().getSensorHandle(cbData->sensorType,
+                                                  &sensorHandle);
 
-      // Memory will be freed after core framework performs its updates.
-      struct chreSensorSamplingStatus *status =
-          memoryAlloc<struct chreSensorSamplingStatus>();
-      mergeUpdatedStatus(sensorHandle, *cbData.get(), status);
+        // Memory will be freed after core framework performs its updates.
+        struct chreSensorSamplingStatus *status =
+            memoryAlloc<struct chreSensorSamplingStatus>();
+        mergeUpdatedStatus(sensorHandle, *cbData.get(), status);
 
-      getSensorRequestManager().handleSamplingStatusUpdate(sensorHandle,
-                                                           status);
-    };
-    // Schedule a deferred callback to handle sensor status change in the main
-    // thread.
-    EventLoopManagerSingleton::get()->deferCallback(
-        SystemCallbackType::SensorStatusUpdate, status.release(), callback);
+        getSensorRequestManager().handleSamplingStatusUpdate(sensorHandle,
+                                                             status);
+      };
+      // Schedule a deferred callback to handle sensor status change in the main
+      // thread.
+      EventLoopManagerSingleton::get()->deferCallback(
+          SystemCallbackType::SensorStatusUpdate, status.release(), callback);
+    }
   }
 }
 
